@@ -8,10 +8,11 @@ data class Candidate(
     val nameScore: Int,
     val guardianScore: Int,
     val penalized: Boolean,
-    val reasons: List<String>
+    val reasons: List<String>,
+    val gradeMatch: Int = 0
 )
 
-// candidates 中未使用的按分数降序，已用于其他学生的排在后面；只含 nameScore>=30 的
+// candidates 中正常候选在前，已使用的其次，年级不符的最后；组内按分数降序，只含 nameScore>=30 的
 data class MatchResult(val verdict: Verdict, val candidates: List<Candidate>)
 
 object Matcher {
@@ -34,7 +35,45 @@ object Matcher {
         .flatMap { index -> SYNONYMS[index].map { it to index } }
         .sortedByDescending { it.first.length }
 
+    private val PHONE_SUFFIX = Regex("""\d{7,}$""")
+
     private data class ScoredCandidate(val candidate: Candidate, val used: Boolean)
+
+    /** 一年级…九年级、1年级…9年级、初一/初二/初三。识别不了返回 null。 */
+    fun gradeNumber(grade: String): Int? {
+        val g = grade.filterNot { it.isWhitespace() }
+        if (g.isEmpty()) return null
+        when {
+            g.startsWith("初一") -> return 7
+            g.startsWith("初二") -> return 8
+            g.startsWith("初三") -> return 9
+        }
+        val digit = when (g.first()) {
+            '一' -> 1
+            '二' -> 2
+            '三' -> 3
+            '四' -> 4
+            '五' -> 5
+            '六' -> 6
+            '七' -> 7
+            '八' -> 8
+            '九' -> 9
+            in '1'..'9' -> g.first().digitToInt()
+            else -> return null
+        }
+        if (!g.substring(1).startsWith("年级")) return null
+        return digit
+    }
+
+    /** 备注去掉首尾空白后，以 1 位数字 1–9 开头且下一个字符不是数字时返回该数字。 */
+    fun contactGrade(contact: String): Int? {
+        val text = contact.trim()
+        if (text.isEmpty()) return null
+        val first = text[0]
+        if (first !in '1'..'9') return null
+        if (text.length > 1 && text[1].isDigit()) return null
+        return first.digitToInt()
+    }
 
     fun searchTerms(name: String): List<String> {
         val n = clean(name)
@@ -47,38 +86,62 @@ object Matcher {
             if (n.length >= 3) n.substring(1) else ""
         }
         if (given.length >= 2 && given != n) terms.add(given)
+        if (n.length >= 3) {
+            val firstTwo = n.take(2)
+            if (firstTwo !in terms) terms.add(firstTwo)
+        }
         return terms
     }
 
     fun score(student: Student, contact: String, otherNames: Collection<String> = emptyList()): Candidate {
-        val cleaned = clean(contact)
-        val (nameScore, nameReason) = nameScore(student.name, cleaned)
-        val (guardianScore, guardianReason) = guardianScore(student.guardian, cleaned)
+        val contactGradeValue = contactGrade(contact)
+        val studentGradeValue = gradeNumber(student.grade)
+        val gradeMatch = when {
+            contactGradeValue == null || studentGradeValue == null -> 0
+            contactGradeValue == studentGradeValue -> 1
+            else -> -1
+        }
+        val matchText = matchingText(contact)
+
+        val (nameScore, nameReason) = nameScore(student.name, matchText)
+        val (guardianScore, guardianReason) = guardianScore(student.guardian, matchText)
         val reasons = ArrayList<String>()
         reasons.add(nameReason)
         reasons.add(guardianReason)
 
-        var contextBonus = 0
         val grade = student.grade.trim()
-        if (grade.isNotEmpty() &&
-            (cleaned.contains(grade) || cleaned.contains(grade.first() + "年"))
-        ) {
+        val textualGrade = grade.isNotEmpty() &&
+            (matchText.contains(grade) || matchText.contains(grade.first() + "年"))
+        var contextBonus = 0
+        if (gradeMatch == 1 || textualGrade) {
             contextBonus = 10
-            reasons.add("联系人包含年级信息 +10")
+            reasons.add(
+                if (gradeMatch == 1) "备注年级一致 +10"
+                else "联系人包含年级信息 +10"
+            )
         }
 
-        val penalty = penalty(student.name, student.guardian, cleaned, otherNames)
-        if (penalty != null) reasons.add(penalty)
+        val penaltyReasons = ArrayList<String>()
+        if (gradeMatch == -1) {
+            penaltyReasons.add(
+                "年级不符（备注为 ${contactGradeValue ?: "-"}，学生为 ${student.grade}）"
+            )
+        }
+        val originalPenalty = penalty(student.name, student.guardian, matchText, otherNames)
+        if (originalPenalty != null) penaltyReasons.add(originalPenalty)
+        reasons.addAll(penaltyReasons)
+        val penalized = penaltyReasons.isNotEmpty()
 
-        val total = (nameScore + guardianScore + contextBonus - if (penalty == null) 0 else 40)
+        val total = (nameScore + guardianScore + contextBonus - (if (penalized) 40 else 0))
             .coerceIn(0, 100)
         return Candidate(
             contact = contact,
             score = total,
             nameScore = nameScore,
             guardianScore = guardianScore,
-            penalized = penalty != null,
-            reasons = reasons
+            penalized = penalized,
+            reasons = reasons,
+            gradeMatch = gradeMatch
         )
     }
 
@@ -109,17 +172,17 @@ object Matcher {
         if (candidates.isEmpty()) return MatchResult(Verdict.NONE, emptyList())
 
         val sorted = candidates.sortedWith(
-            compareBy<ScoredCandidate> { if (it.used) 1 else 0 }
+            compareBy<ScoredCandidate> { groupOf(it) }
                 .thenByDescending { it.candidate.score }
         )
         val sortedCandidates = sorted.map { it.candidate }
 
+        // remembered 规则保持不变，最优先；已用于其他学生的联系人仍不能 AUTO。
         if (!remembered.isNullOrBlank()) {
             val rememberedKey = clean(remembered)
             val index = sorted.indexOfFirst { clean(it.candidate.contact) == rememberedKey }
             if (index >= 0) {
                 val pick = sorted[index]
-                // 已用于其他学生的联系人即使命中 remembered 也不能 AUTO。
                 if (pick.used) return MatchResult(Verdict.CONFIRM, sortedCandidates)
                 val reordered = ArrayList(sorted)
                 reordered.removeAt(index)
@@ -129,15 +192,48 @@ object Matcher {
         }
 
         val first = sorted[0]
-        val second = sorted.getOrNull(1)
-        val auto = !sameNameExists &&
-            !first.used &&
-            first.candidate.score >= 85 &&
-            first.candidate.nameScore == 60 &&
-            first.candidate.guardianScore >= 25 &&
-            !first.candidate.penalized &&
-            (second == null || first.candidate.score - second.candidate.score >= 15)
+        val firstCandidate = first.candidate
+        val firstIsEffective = firstCandidate.gradeMatch != -1 && !first.used
+        val firstOk = firstIsEffective &&
+            firstCandidate.nameScore == 60 &&
+            !firstCandidate.penalized
+        val effective = sorted.filter { it.candidate.gradeMatch != -1 && !it.used }
+        val secondEffective = effective.getOrNull(1)
+
+        val ruleA = firstOk &&
+            firstCandidate.score >= 85 &&
+            firstCandidate.guardianScore >= 25 &&
+            (secondEffective == null ||
+                firstCandidate.score - secondEffective.candidate.score >= 15)
+
+        val uniqueGradeOne = effective.filter {
+            it.candidate.gradeMatch == 1 && it.candidate.nameScore == 60
+        }
+        val ruleB = firstOk &&
+            firstCandidate.gradeMatch == 1 &&
+            firstCandidate.guardianScore >= 10 &&
+            uniqueGradeOne.size == 1 &&
+            effective.none {
+                it !== first && it.candidate.guardianScore > firstCandidate.guardianScore
+            }
+
+        val sameNameOk = !sameNameExists || firstCandidate.gradeMatch == 1
+        val auto = sameNameOk && (ruleA || ruleB)
         return MatchResult(if (auto) Verdict.AUTO else Verdict.CONFIRM, sortedCandidates)
+    }
+
+    private fun groupOf(scored: ScoredCandidate): Int = when {
+        scored.candidate.gradeMatch == -1 -> 2
+        scored.used -> 1
+        else -> 0
+    }
+
+    private fun matchingText(contact: String): String {
+        var text = contact.filterNot { it.isWhitespace() }
+        if (contactGrade(contact) != null && text.isNotEmpty()) {
+            text = text.substring(1)
+        }
+        return text.replace(PHONE_SUFFIX, "")
     }
 
     private fun nameScore(rawName: String, contact: String): Pair<Int, String> {

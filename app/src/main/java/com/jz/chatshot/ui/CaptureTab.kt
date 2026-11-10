@@ -132,6 +132,12 @@ fun CaptureTab(resumeTick: Int) {
         ) {
             Text("开始采集")
         }
+        Text(
+            "点悬浮条上的“自动”开始；遇到拿不准的会暂停，处理完点“继续”。",
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp)
+        )
 
         Spacer(modifier = Modifier.height(20.dp))
         if (student == null) {

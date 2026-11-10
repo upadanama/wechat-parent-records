@@ -9,6 +9,7 @@ import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.view.Display
@@ -25,6 +26,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.jz.chatshot.core.Archive
 import com.jz.chatshot.core.Candidate
+import com.jz.chatshot.core.MatchResult
 import com.jz.chatshot.core.Matcher
 import com.jz.chatshot.core.Status
 import com.jz.chatshot.core.Student
@@ -35,12 +37,17 @@ import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executors
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.coroutines.resume
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+
+private enum class AutoState { IDLE, RUNNING, PAUSED }
 
 class ShotService : AccessibilityService() {
 
@@ -53,6 +60,7 @@ class ShotService : AccessibilityService() {
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val monthDayFormatter = DateTimeFormatter.ofPattern("MM-dd")
     private val diagnosticTimeFormatter = DateTimeFormatter.ofPattern("HHmmss")
+
     private var lastToast: Toast? = null
     private var transientStatus: String? = null
     private val clearTransientRunnable = Runnable {
@@ -63,12 +71,20 @@ class ShotService : AccessibilityService() {
     private var windowManager: WindowManager? = null
     private var bar: LinearLayout? = null
     private var titleView: TextView? = null
+    private var autoButton: Button? = null
     private var findButton: Button? = null
     private var candidateScroll: ScrollView? = null
     private var candidateContainer: LinearLayout? = null
     private var searchJob: Job? = null
     private var searchToken = 0
     private var lastShotAt = 0L
+
+    private var autoState = AutoState.IDLE
+    private var autoJob: Job? = null
+    private var autoStep: String? = null
+    private var autoPauseReason: String? = null
+    private var autoNotice: String? = null
+    private var autoCandidateStudentId: Int? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -129,7 +145,7 @@ class ShotService : AccessibilityService() {
         )
 
         val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val labels = listOf("◀", "查找", "截图", "未找到", "▶", "✕")
+        val labels = listOf("◀", "自动", "查找", "截图", "未找到", "▶", "✕")
         labels.forEachIndexed { index, label ->
             val button = Button(this).apply {
                 text = label
@@ -150,7 +166,8 @@ class ShotService : AccessibilityService() {
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             )
         }
-        findButton = buttons.getChildAt(1) as Button
+        autoButton = buttons.getChildAt(1) as Button
+        findButton = buttons.getChildAt(2) as Button
         findButton?.setOnLongClickListener {
             saveDiagnostic()
             true
@@ -213,6 +230,7 @@ class ShotService : AccessibilityService() {
         } catch (e: Exception) {
             toast("悬浮条添加失败，请检查悬浮窗权限")
             titleView = null
+            autoButton = null
             findButton = null
             candidateScroll = null
             candidateContainer = null
@@ -223,6 +241,7 @@ class ShotService : AccessibilityService() {
     }
 
     fun hideBar() {
+        stopAuto()
         searchJob?.cancel()
         clearTransientStatus()
         hideCandidates()
@@ -230,12 +249,18 @@ class ShotService : AccessibilityService() {
         runCatching { windowManager?.removeView(view) }
         bar = null
         titleView = null
+        autoButton = null
         findButton = null
         candidateScroll = null
         candidateContainer = null
     }
 
     private fun refreshBar() {
+        autoButton?.text = when (autoState) {
+            AutoState.IDLE -> "自动"
+            AutoState.RUNNING -> "暂停"
+            AutoState.PAUSED -> "继续"
+        }
         val title = titleView ?: return
         val total = Store.students.size
         val base = if (total == 0) {
@@ -247,8 +272,17 @@ class ShotService : AccessibilityService() {
             "${index + 1}/$total ${student.grade} ${student.name}$guardian " +
                 "${bannerDate(student)} 已截${student.shots.size}张"
         }
-        val status = transientStatus
-        title.text = if (status == null) base else "$base $status"
+        val suffix = when (autoState) {
+            AutoState.RUNNING -> autoStep ?: "运行中"
+            AutoState.PAUSED -> autoPauseReason ?: "已暂停"
+            AutoState.IDLE -> autoNotice ?: transientStatus
+        }
+        title.text = if (suffix == null) base else "$base $suffix"
+    }
+
+    private fun hourLabel(time: String): String {
+        val hour = time.substringBefore(':').trim().toIntOrNull() ?: return ""
+        return if (hour in 0..23) "${hour}点" else ""
     }
 
     private fun bannerDate(student: Student): String {
@@ -262,17 +296,27 @@ class ShotService : AccessibilityService() {
             to != null -> monthDayFormatter.format(to)
             else -> "无日期"
         }
-        return if (student.time.isNotEmpty()) "$base ${student.time}" else base
+        val time = hourLabel(student.time)
+        return if (time.isEmpty()) base else "$base $time"
     }
 
     private fun onBarAction(index: Int) {
         when (index) {
-            0 -> move(-1)
-            1 -> startFind()
-            2 -> takeShot()
-            3 -> markNotFound()
-            4 -> move(1)
-            5 -> hideBar()
+            0 -> if (autoState == AutoState.IDLE) move(-1)
+            1 -> onAutoButton()
+            2 -> if (autoState == AutoState.IDLE) startFind()
+            3 -> if (autoState != AutoState.RUNNING) onManualShoot()
+            4 -> if (autoState != AutoState.RUNNING) markNotFound()
+            5 -> if (autoState == AutoState.IDLE) move(1)
+            6 -> hideBar()
+        }
+    }
+
+    private fun onAutoButton() {
+        when (autoState) {
+            AutoState.IDLE -> startAuto()
+            AutoState.RUNNING -> pauseAutoManually()
+            AutoState.PAUSED -> continueAuto()
         }
     }
 
@@ -285,28 +329,52 @@ class ShotService : AccessibilityService() {
     }
 
     private fun move(delta: Int) {
+        if (autoState != AutoState.IDLE) return
         val total = Store.students.size
         if (total == 0) return
         Store.current = (Store.current + delta).coerceIn(0, total - 1)
         Store.save()
+        autoNotice = null
         clearTransientStatus()
         hideCandidates()
         refreshBar()
     }
 
     private fun markNotFound() {
+        if (autoState == AutoState.RUNNING) return
         val student = currentStudent() ?: return
         Store.update(student.id) { it.copy(status = Status.NOT_FOUND) }
-        move(1)
+        if (autoState == AutoState.PAUSED) {
+            hideCandidates()
+            autoCandidateStudentId = null
+            continueAuto()
+        } else {
+            autoNotice = null
+            move(1)
+        }
     }
 
-    private fun takeShot() {
+    private fun onManualShoot() {
+        if (autoState == AutoState.RUNNING) return
         val student = currentStudent() ?: run {
-            showTransientStatus("请先导入名单")
+            if (autoState == AutoState.IDLE) showTransientStatus("请先导入名单")
             return
         }
+        if (autoState == AutoState.IDLE) {
+            autoNotice = null
+            refreshBar()
+        }
+        scope.launch {
+            val ok = shoot(student)
+            if (ok && autoState == AutoState.IDLE) {
+                showTransientStatus("✓已保存")
+            }
+        }
+    }
+
+    private suspend fun shoot(student: Student): Boolean {
         val now = System.currentTimeMillis()
-        if (now - lastShotAt < 1100) return
+        if (now - lastShotAt < 1100) return false
         lastShotAt = now
 
         lastToast?.cancel()
@@ -316,9 +384,28 @@ class ShotService : AccessibilityService() {
         val barView = bar
         barView?.visibility = View.INVISIBLE
 
-        handler.postDelayed({
-            try {
-                takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+        var restored = false
+        fun restoreBar() {
+            if (!restored) {
+                restored = true
+                barView?.visibility = View.VISIBLE
+                refreshBar()
+            }
+        }
+
+        try {
+            delay(250)
+            return suspendCancellableCoroutine<Boolean> { continuation ->
+                val finish: (Boolean) -> Unit = { result ->
+                    restoreBar()
+                    if (continuation.isActive) continuation.resume(result)
+                }
+
+                continuation.invokeOnCancellation {
+                    handler.post { restoreBar() }
+                }
+
+                val callback = object : TakeScreenshotCallback {
                     override fun onSuccess(screenshot: ScreenshotResult) {
                         val buffer = screenshot.hardwareBuffer
                         val bitmap = runCatching {
@@ -327,8 +414,8 @@ class ShotService : AccessibilityService() {
                         }.getOrNull()
                         buffer.close()
                         if (bitmap == null) {
-                            barView?.visibility = View.VISIBLE
                             toast("截图失败：无法生成图片")
+                            finish(false)
                             return
                         }
 
@@ -348,34 +435,39 @@ class ShotService : AccessibilityService() {
                                     Store.update(student.id) {
                                         it.copy(shots = it.shots + path, status = Status.SHOT)
                                     }
-                                    barView?.visibility = View.VISIBLE
-                                    showTransientStatus("✓已保存")
                                 } else {
-                                    barView?.visibility = View.VISIBLE
-                                    refreshBar()
                                     toast("保存截图失败")
                                 }
+                                finish(saved)
                             }
                         }
                     }
 
                     override fun onFailure(errorCode: Int) {
-                        barView?.visibility = View.VISIBLE
                         toast("截图失败：错误码 $errorCode")
+                        finish(false)
                     }
-                })
-            } catch (e: Exception) {
-                barView?.visibility = View.VISIBLE
-                toast("截图失败：${e.message ?: "未知错误"}")
+                }
+                try {
+                    takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, callback)
+                } catch (e: Exception) {
+                    toast("截图失败：${e.message ?: "未知错误"}")
+                    finish(false)
+                }
             }
-        }, 250)
+        } catch (e: CancellationException) {
+            restoreBar()
+            throw e
+        }
     }
 
     private fun startFind() {
+        if (autoState != AutoState.IDLE) return
         val student = currentStudent() ?: run {
             showTransientStatus("请先导入名单")
             return
         }
+        autoNotice = null
         searchJob?.cancel()
         hideCandidates()
         searchToken++
@@ -384,38 +476,20 @@ class ShotService : AccessibilityService() {
             text = "…"
             isEnabled = false
         }
+        refreshBar()
         searchJob = scope.launch {
             try {
-                var contacts = emptyList<String>()
-                for (term in Matcher.searchTerms(student.name)) {
-                    contacts = WeChat.findContacts(this@ShotService, term)
-                    if (contacts.isNotEmpty()) break
-                }
+                val contacts = searchContacts(student)
                 if (contacts.isEmpty()) {
                     showTransientStatus("未找到候选，请手动查找")
                     return@launch
                 }
-                val otherNames = Store.students.filter { it.id != student.id }.map { it.name }
-                val remembered = Store.memory[Store.memKey(student)]
-                val sameNameExists = Store.students.any {
-                    it.id != student.id && it.name == student.name
-                }
-                val usedContacts = Store.students
-                    .filter { it.id != student.id && it.contact.isNotBlank() }
-                    .associate { it.contact to "${it.grade} ${it.name}".trim() }
-                val result = Matcher.match(
-                    student = student,
-                    contacts = contacts,
-                    otherNames = otherNames,
-                    remembered = remembered,
-                    sameNameExists = sameNameExists,
-                    usedContacts = usedContacts
-                )
+                val result = matchContacts(student, contacts)
                 when (result.verdict) {
                     Verdict.AUTO -> {
                         val candidate = result.candidates.firstOrNull()
                         if (candidate != null) {
-                            openCandidate(student, candidate)
+                            openCandidateManual(student, candidate)
                         } else {
                             showTransientStatus("未找到候选，请手动查找")
                         }
@@ -438,7 +512,35 @@ class ShotService : AccessibilityService() {
         }
     }
 
-    private suspend fun openCandidate(student: Student, candidate: Candidate) {
+    private suspend fun searchContacts(student: Student): List<String> {
+        var contacts = emptyList<String>()
+        for (term in Matcher.searchTerms(student.name)) {
+            contacts = WeChat.findContacts(this@ShotService, term)
+            if (contacts.isNotEmpty()) break
+        }
+        return contacts
+    }
+
+    private fun matchContacts(student: Student, contacts: List<String>): MatchResult {
+        val otherNames = Store.students.filter { it.id != student.id }.map { it.name }
+        val remembered = Store.memory[Store.memKey(student)]
+        val sameNameExists = Store.students.any {
+            it.id != student.id && it.name == student.name
+        }
+        val usedContacts = Store.students
+            .filter { it.id != student.id && it.contact.isNotBlank() }
+            .associate { it.contact to "${it.grade} ${it.name}".trim() }
+        return Matcher.match(
+            student = student,
+            contacts = contacts,
+            otherNames = otherNames,
+            remembered = remembered,
+            sameNameExists = sameNameExists,
+            usedContacts = usedContacts
+        )
+    }
+
+    private suspend fun openAndRecord(student: Student, candidate: Candidate): Boolean {
         val opened = try {
             WeChat.openContact(this@ShotService, candidate.contact)
         } catch (e: CancellationException) {
@@ -446,20 +548,302 @@ class ShotService : AccessibilityService() {
         } catch (e: Exception) {
             false
         }
-        if (!opened) {
-            showTransientStatus("自动查找失败，请手动操作")
-            return
-        }
+        if (!opened) return false
         Store.update(student.id) {
             it.copy(status = Status.MATCHED, contact = candidate.contact)
         }
         Store.memory[Store.memKey(student)] = candidate.contact
         Store.save()
+        return true
+    }
+
+    private suspend fun openCandidateManual(student: Student, candidate: Candidate) {
+        if (!openAndRecord(student, candidate)) {
+            showTransientStatus("自动查找失败，请手动操作")
+            return
+        }
         hideCandidates()
         showTransientStatus("✓已打开 ${candidate.contact}")
     }
 
-    private fun showCandidates(student: Student, candidates: List<Candidate>) {
+    private fun startAuto() {
+        if (autoState != AutoState.IDLE) return
+        if (Store.students.isEmpty()) {
+            showTransientStatus("请先导入名单")
+            return
+        }
+        val start = Store.current.coerceIn(0, Store.students.lastIndex)
+        searchJob?.cancel()
+        searchToken++
+        findButton?.apply {
+            text = "查找"
+            isEnabled = true
+        }
+        hideCandidates()
+        clearTransientStatus()
+        autoNotice = null
+        autoPauseReason = null
+        autoStep = null
+        autoCandidateStudentId = null
+        autoState = AutoState.RUNNING
+        Store.current = start
+        Store.save()
+        refreshBar()
+        launchAutoLoop(start, skipFindForFirst = false)
+    }
+
+    private fun pauseAutoManually() {
+        if (autoState != AutoState.RUNNING) return
+        autoJob?.cancel()
+        autoJob = null
+        autoState = AutoState.PAUSED
+        autoStep = null
+        autoPauseReason = "已暂停"
+        autoCandidateStudentId = null
+        hideCandidates()
+        clearTransientStatus()
+        refreshBar()
+    }
+
+    private fun continueAuto() {
+        if (autoState != AutoState.PAUSED) return
+        hideCandidates()
+        autoCandidateStudentId = null
+        autoPauseReason = null
+        autoStep = null
+        autoNotice = null
+        clearTransientStatus()
+        val total = Store.students.size
+        val next = Store.current + 1
+        if (total == 0 || next >= total) {
+            finishAuto()
+            return
+        }
+        Store.current = next
+        Store.save()
+        autoState = AutoState.RUNNING
+        refreshBar()
+        launchAutoLoop(next, skipFindForFirst = false)
+    }
+
+    private fun resumeAutoAtLocate(studentId: Int) {
+        val index = Store.students.indexOfFirst { it.id == studentId }
+        if (index < 0) {
+            finishAuto()
+            return
+        }
+        hideCandidates()
+        autoCandidateStudentId = null
+        autoPauseReason = null
+        autoStep = null
+        autoNotice = null
+        clearTransientStatus()
+        Store.current = index
+        Store.save()
+        autoState = AutoState.RUNNING
+        refreshBar()
+        launchAutoLoop(index, skipFindForFirst = true)
+    }
+
+    private fun launchAutoLoop(startIndex: Int, skipFindForFirst: Boolean) {
+        autoJob?.cancel()
+        autoJob = scope.launch {
+            runAutoLoop(startIndex, skipFindForFirst)
+        }
+    }
+
+    private suspend fun runAutoLoop(startIndex: Int, skipFindForFirst: Boolean) {
+        var index = startIndex.coerceAtLeast(0)
+        var skipFindForIndex = if (skipFindForFirst) startIndex else -1
+        try {
+            while (index < Store.students.size) {
+                if (autoState != AutoState.RUNNING) return
+                val student = Store.students.getOrNull(index) ?: break
+                Store.current = index
+                Store.save()
+                refreshBar()
+                if (student.status == Status.SHOT ||
+                    student.status == Status.NOT_FOUND ||
+                    student.status == Status.SKIPPED
+                ) {
+                    index++
+                    continue
+                }
+
+                val skipFind = index == skipFindForIndex
+                skipFindForIndex = -1
+                if (!skipFind) {
+                    setAutoStep("查找中")
+                    delay(700)
+                    val contacts = searchContacts(student)
+                    if (contacts.isEmpty()) {
+                        pauseAuto("未找到联系人")
+                        return
+                    }
+                    val result = matchContacts(student, contacts)
+                    when (result.verdict) {
+                        Verdict.AUTO -> {
+                            val candidate = result.candidates.firstOrNull()
+                            if (candidate == null) {
+                                pauseAuto("未找到联系人")
+                                return
+                            }
+                            if (!openAndRecord(student, candidate)) {
+                                pauseAuto("打开聊天失败")
+                                return
+                            }
+                            hideCandidates()
+                            delay(700)
+                        }
+                        Verdict.CONFIRM -> {
+                            showCandidates(student, result.candidates, autoResume = true)
+                            autoCandidateStudentId = student.id
+                            pauseAuto(
+                                "有 ${result.candidates.size} 位候选，请选择",
+                                keepCandidates = true
+                            )
+                            return
+                        }
+                        Verdict.NONE -> {
+                            pauseAuto("未找到联系人")
+                            return
+                        }
+                    }
+                }
+
+                val date = student.dateFrom
+                if (date == null) {
+                    pauseAuto("名单没有日期，请手动翻到位置")
+                    return
+                }
+                setAutoStep("定位中")
+                delay(700)
+                val locateResult = try {
+                    WeChat.locate(
+                        this@ShotService,
+                        date,
+                        student.time,
+                        student.timeExact
+                    ) { barRect() }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    LocateResult.FAILED
+                }
+                when (locateResult) {
+                    LocateResult.OK -> Unit
+                    LocateResult.NO_CHAT_THAT_DAY -> {
+                        pauseAuto("${monthDayFormatter.format(date)} 当天没有聊天记录")
+                        return
+                    }
+                    LocateResult.CANNOT_READ_TIME -> {
+                        saveDiagnostic()
+                        pauseAuto("读不到聊天时间，请手动翻到位置")
+                        return
+                    }
+                    LocateResult.FAILED -> {
+                        pauseAuto("定位失败，请手动翻到位置")
+                        return
+                    }
+                }
+
+                setAutoStep("截图中")
+                delay(700)
+                if (!shoot(student)) {
+                    pauseAuto("截图失败")
+                    return
+                }
+
+                index++
+                if (index < Store.students.size) {
+                    Store.current = index
+                    Store.save()
+                }
+                refreshBar()
+                delay(800)
+            }
+            finishAuto()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            pauseAuto("自动流程异常：${e.message ?: "未知错误"}")
+        }
+    }
+
+    private fun setAutoStep(step: String) {
+        autoStep = step
+        refreshBar()
+    }
+
+    private fun pauseAuto(reason: String, keepCandidates: Boolean = false) {
+        autoState = AutoState.PAUSED
+        autoStep = null
+        autoPauseReason = reason
+        if (!keepCandidates) {
+            hideCandidates()
+            autoCandidateStudentId = null
+        }
+        refreshBar()
+    }
+
+    private fun dismissAutoCandidates() {
+        hideCandidates()
+        if (autoState == AutoState.PAUSED && autoCandidateStudentId != null) {
+            autoCandidateStudentId = null
+            autoPauseReason = "请手动处理"
+            refreshBar()
+        }
+    }
+
+    private fun selectAutoCandidate(student: Student, candidate: Candidate) {
+        if (autoState != AutoState.PAUSED || autoCandidateStudentId != student.id) return
+        scope.launch {
+            val opened = openAndRecord(student, candidate)
+            if (!opened) {
+                if (autoState == AutoState.PAUSED) {
+                    autoPauseReason = "打开聊天失败"
+                    refreshBar()
+                }
+                return@launch
+            }
+            if (autoState != AutoState.PAUSED || autoCandidateStudentId != student.id) {
+                return@launch
+            }
+            resumeAutoAtLocate(student.id)
+        }
+    }
+
+    private fun finishAuto() {
+        autoState = AutoState.IDLE
+        autoStep = null
+        autoPauseReason = null
+        autoCandidateStudentId = null
+        autoJob = null
+        hideCandidates()
+        clearTransientStatus()
+        val shot = Store.students.count { it.status == Status.SHOT }
+        val unfinished = Store.students.count {
+            it.status == Status.PENDING || it.status == Status.MATCHED
+        }
+        autoNotice = "全部完成：已截 $shot 人，未完成 $unfinished 人"
+        refreshBar()
+    }
+
+    private fun stopAuto() {
+        autoJob?.cancel()
+        autoJob = null
+        autoState = AutoState.IDLE
+        autoStep = null
+        autoPauseReason = null
+        autoNotice = null
+        autoCandidateStudentId = null
+    }
+
+    private fun showCandidates(
+        student: Student,
+        candidates: List<Candidate>,
+        autoResume: Boolean = false
+    ) {
         val container = candidateContainer ?: return
         val scroll = candidateScroll ?: return
         container.removeAllViews()
@@ -477,7 +861,11 @@ class ShotService : AccessibilityService() {
                 setBackgroundColor(Color.parseColor("#33FFFFFF"))
                 isClickable = true
                 setOnClickListener {
-                    scope.launch { openCandidate(student, candidate) }
+                    if (autoResume) {
+                        selectAutoCandidate(student, candidate)
+                    } else {
+                        scope.launch { openCandidateManual(student, candidate) }
+                    }
                 }
             }
             container.addView(
@@ -494,7 +882,9 @@ class ShotService : AccessibilityService() {
             textSize = 12f
             setPadding(dp(8), dp(6), dp(8), dp(6))
             isClickable = true
-            setOnClickListener { hideCandidates() }
+            setOnClickListener {
+                if (autoResume) dismissAutoCandidates() else hideCandidates()
+            }
         }
         container.addView(
             none,
@@ -512,6 +902,7 @@ class ShotService : AccessibilityService() {
     }
 
     private fun showTransientStatus(message: String) {
+        autoNotice = null
         handler.removeCallbacks(clearTransientRunnable)
         transientStatus = message
         refreshBar()
@@ -550,6 +941,19 @@ class ShotService : AccessibilityService() {
         val tip = Toast.makeText(this, message, Toast.LENGTH_SHORT)
         lastToast = tip
         tip.show()
+    }
+
+    private fun barRect(): Rect? {
+        val view = bar ?: return null
+        if (view.width <= 0 || view.height <= 0) return null
+        val location = IntArray(2)
+        view.getLocationOnScreen(location)
+        return Rect(
+            location[0],
+            location[1],
+            location[0] + view.width,
+            location[1] + view.height
+        )
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

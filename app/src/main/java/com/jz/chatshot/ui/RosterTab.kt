@@ -28,6 +28,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,6 +37,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -57,6 +59,12 @@ fun RosterTab() {
     val scope = rememberCoroutineScope()
     var pendingRows by remember { mutableStateOf<List<List<String>>?>(null) }
     var menuOpenId by remember { mutableStateOf<Int?>(null) }
+    var onlyUnfinished by remember { mutableStateOf(false) }
+    val shown = Store.students.withIndex().filter { entry ->
+        !onlyUnfinished ||
+            entry.value.status == Status.PENDING ||
+            entry.value.status == Status.MATCHED
+    }
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -87,10 +95,26 @@ fun RosterTab() {
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Stat("总数", Store.students.size)
+            Stat(
+                "未完成",
+                Store.students.count {
+                    it.status == Status.PENDING || it.status == Status.MATCHED
+                }
+            )
             Stat("已匹配", Store.students.count { it.status == Status.MATCHED })
             Stat("已截图", Store.students.count { it.status == Status.SHOT })
             Stat("未找到", Store.students.count { it.status == Status.NOT_FOUND })
             Stat("待处理", Store.students.count { it.status == Status.PENDING })
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("只看未完成", modifier = Modifier.weight(1f), fontSize = 13.sp)
+            Switch(checked = onlyUnfinished, onCheckedChange = { onlyUnfinished = it })
         }
 
         Button(
@@ -124,14 +148,22 @@ fun RosterTab() {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+            } else if (shown.isEmpty()) {
+                item {
+                    Text(
+                        "没有未完成的学生。",
+                        modifier = Modifier.padding(16.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
-            itemsIndexed(Store.students, key = { _, student -> student.id }) { index, student ->
+            itemsIndexed(shown, key = { _, entry -> entry.value.id }) { _, entry ->
                 StudentRow(
-                    index = index,
-                    student = student,
-                    menuOpen = menuOpenId == student.id,
-                    onOpenMenu = { menuOpenId = student.id },
-                    onCloseMenu = { if (menuOpenId == student.id) menuOpenId = null }
+                    index = entry.index,
+                    student = entry.value,
+                    menuOpen = menuOpenId == entry.value.id,
+                    onOpenMenu = { menuOpenId = entry.value.id },
+                    onCloseMenu = { if (menuOpenId == entry.value.id) menuOpenId = null }
                 )
             }
         }
@@ -191,7 +223,8 @@ private fun StudentRow(
             )
             val dateText = buildString {
                 append(dateRangeText(student))
-                if (student.time.isNotEmpty()) append("  ").append(student.time)
+                val time = hourLabel(student.time)
+                if (time.isNotEmpty()) append("  ").append(time)
             }
             Text(
                 "$dateText | ${statusText(student.status)} | 联系人：${student.contact.ifBlank { "-" }} | 截图 ${student.shots.size}",
@@ -314,6 +347,11 @@ internal fun statusText(status: Status): String = when (status) {
     Status.SHOT -> "已截图"
     Status.NOT_FOUND -> "未找到"
     Status.SKIPPED -> "已跳过"
+}
+
+private fun hourLabel(time: String): String {
+    val hour = time.substringBefore(':').trim().toIntOrNull() ?: return ""
+    return if (hour in 0..23) "${hour}点" else ""
 }
 
 private fun dateRangeText(student: Student): String {
