@@ -51,6 +51,7 @@ object Store {
             o.put("dateFrom", s.dateFrom?.toString() ?: JSONObject.NULL)
             o.put("dateTo", s.dateTo?.toString() ?: JSONObject.NULL)
             o.put("time", s.time)
+            o.put("timeExact", s.timeExact)
             o.put("status", s.status.name)
             o.put("contact", s.contact)
             o.put("note", s.note)
@@ -128,6 +129,7 @@ object Store {
                         dateFrom = jsonDate(o, "dateFrom"),
                         dateTo = jsonDate(o, "dateTo"),
                         time = o.optString("time", ""),
+                        timeExact = o.optBoolean("timeExact", true),
                         status = status,
                         contact = o.optString("contact", ""),
                         note = o.optString("note", ""),

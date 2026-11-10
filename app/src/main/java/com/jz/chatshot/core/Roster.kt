@@ -7,7 +7,10 @@ object Roster {
 
     private val GUARDIAN_KEYS = listOf("监护人", "称呼", "沟通对象", "家长", "关系")
     private val DATE_KEYS = listOf("日期", "时间")
-    private val TIME_TOKEN = Regex("""^(\d{1,2}):(\d{2})$""")
+    private val COLON_TIME = Regex("""^(\d{1,2}):(\d{2})$""")
+    private val HOUR_ONLY = Regex("""^(\d{1,2})$""")
+    private val CN_TIME = Regex("""^(\d{1,2})[点时](?:(\d{1,2})分?)?$""")
+    private val CN_HALF = Regex("""^(\d{1,2})[点时]半$""")
     private val FULL_DATE = Regex("""^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$""")
     private val CN_DATE = Regex("""^(\d{4})年(\d{1,2})月(\d{1,2})[日号]?$""")
     private val COMPACT_DATE = Regex("""^(\d{8})$""")
@@ -30,6 +33,9 @@ object Roster {
         val date: Int,
         val deviation: Int
     )
+
+    private data class TimeParts(val dateText: String, val time: String, val exact: Boolean)
+    private data class ParsedTime(val value: String, val exact: Boolean)
 
     fun parse(
         rows: List<List<String>>,
@@ -61,6 +67,7 @@ object Roster {
             val name = nameRaw.trim()
             val guardian = cell(row, cols.guardian)
             var time = ""
+            var timeExact = true
             var from: LocalDate? = null
             var to: LocalDate? = null
             var dateInvalid = false
@@ -68,9 +75,12 @@ object Roster {
             if (cols.dateFrom >= 0 && cols.dateTo >= 0) {
                 val rawFrom = cell(row, cols.dateFrom)
                 val rawTo = cell(row, cols.dateTo)
-                val (fromText, fromTime) = splitTime(rawFrom)
-                val (toText, toTime) = splitTime(rawTo)
-                time = fromTime.ifEmpty { toTime }
+                val fromParts = splitTime(rawFrom)
+                val toParts = splitTime(rawTo)
+                val fromText = fromParts.dateText
+                val toText = toParts.dateText
+                time = fromParts.time.ifEmpty { toParts.time }
+                timeExact = if (fromParts.time.isNotEmpty()) fromParts.exact else toParts.exact
 
                 var parsedFrom: LocalDate? = null
                 var parsedTo: LocalDate? = null
@@ -95,13 +105,14 @@ object Roster {
             } else if (cols.date >= 0) {
                 val raw = cell(row, cols.date)
                 if (raw.isNotBlank()) {
-                    val (dateText, parsedTime) = splitTime(raw)
-                    time = parsedTime
-                    val bounds = parseDateCell(dateText, today)
-                    if (bounds == null) {
+                    val parts = splitTime(raw)
+                    time = parts.time
+                    timeExact = parts.exact
+                    val bounds = if (parts.dateText.isBlank()) null else parseDateCell(parts.dateText, today)
+                    if (parts.dateText.isNotBlank() && bounds == null) {
                         issues.add(RosterIssue(r + 1, "日期无法识别：$raw"))
                         dateInvalid = true
-                    } else {
+                    } else if (bounds != null) {
                         from = bounds.first
                         to = bounds.second
                     }
@@ -150,7 +161,8 @@ object Roster {
                     guardian = guardian,
                     dateFrom = from,
                     dateTo = to,
-                    time = time
+                    time = time,
+                    timeExact = timeExact
                 )
             )
         }
@@ -284,33 +296,61 @@ object Roster {
         return date to date
     }
 
-    private fun splitTime(raw: String): Pair<String, String> {
+    private fun splitTime(raw: String): TimeParts {
         val normalized = raw.trim().replace('：', ':').replace('　', ' ')
-        if (normalized.isEmpty()) return "" to ""
+        if (normalized.isEmpty()) return TimeParts("", "", true)
         val kept = ArrayList<String>()
         var time = ""
+        var exact = true
         for (token in normalized.split(Regex("""\s+"""))) {
             if (token.isEmpty()) continue
-            val parsed = normalizeTime(token)
+            val parsed = parseTimeToken(token)
             if (parsed != null) {
-                if (time.isEmpty()) time = parsed
+                if (time.isEmpty() && parsed.value.isNotEmpty()) {
+                    time = parsed.value
+                    exact = parsed.exact
+                }
             } else {
                 kept.add(token)
             }
         }
-        return kept.joinToString(" ") to time
+        return TimeParts(kept.joinToString(" "), time, exact)
     }
 
-    private fun normalizeTime(token: String): String? {
-        val match = TIME_TOKEN.matchEntire(token) ?: return null
-        val hour = match.groupValues[1].toIntOrNull() ?: return null
-        val minute = match.groupValues[2].toIntOrNull() ?: return null
-        if (hour !in 0..23 || minute !in 0..59) return null
-        return String.format(Locale.ROOT, "%02d:%02d", hour, minute)
+    private fun parseTimeToken(token: String): ParsedTime? {
+        COLON_TIME.matchEntire(token)?.let { match ->
+            val hour = match.groupValues[1].toInt()
+            val minute = match.groupValues[2].toInt()
+            if (hour !in 0..23 || minute !in 0..59) return ParsedTime("", true)
+            return ParsedTime(hhmm(hour, minute), true)
+        }
+        CN_HALF.matchEntire(token)?.let { match ->
+            val hour = match.groupValues[1].toInt()
+            if (hour !in 0..23) return ParsedTime("", true)
+            return ParsedTime(hhmm(hour, 30), true)
+        }
+        CN_TIME.matchEntire(token)?.let { match ->
+            val hour = match.groupValues[1].toInt()
+            val minuteText = match.groupValues[2]
+            val minute = minuteText.toIntOrNull() ?: 0
+            if (hour !in 0..23 || (minuteText.isNotEmpty() && minute !in 0..59)) {
+                return ParsedTime("", true)
+            }
+            return ParsedTime(hhmm(hour, minute), minuteText.isNotEmpty())
+        }
+        HOUR_ONLY.matchEntire(token)?.let { match ->
+            val hour = match.groupValues[1].toInt()
+            if (hour !in 0..23) return ParsedTime("", true)
+            return ParsedTime(hhmm(hour, 0), false)
+        }
+        return null
     }
+
+    private fun hhmm(hour: Int, minute: Int): String =
+        String.format(Locale.ROOT, "%02d:%02d", hour, minute)
 
     private fun removeTimeTokens(text: String): String {
-        val kept = text.split(Regex("""\s+""")).filter { it.isNotEmpty() && normalizeTime(it) == null }
+        val kept = text.split(Regex("""\s+""")).filter { it.isNotEmpty() && parseTimeToken(it) == null }
         return kept.joinToString(" ")
     }
 

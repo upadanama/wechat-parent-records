@@ -11,7 +11,8 @@ data class Candidate(
     val reasons: List<String>
 )
 
-data class MatchResult(val verdict: Verdict, val candidates: List<Candidate>) // candidates 按分数降序，只含 nameScore>=30 的
+// candidates 中未使用的按分数降序，已用于其他学生的排在后面；只含 nameScore>=30 的
+data class MatchResult(val verdict: Verdict, val candidates: List<Candidate>)
 
 object Matcher {
 
@@ -32,6 +33,8 @@ object Matcher {
     private val ALL_TERMS: List<Pair<String, Int>> = SYNONYMS.indices
         .flatMap { index -> SYNONYMS[index].map { it to index } }
         .sortedByDescending { it.first.length }
+
+    private data class ScoredCandidate(val candidate: Candidate, val used: Boolean)
 
     fun searchTerms(name: String): List<String> {
         val n = clean(name)
@@ -83,38 +86,58 @@ object Matcher {
         student: Student,
         contacts: List<String>,
         otherNames: Collection<String> = emptyList(),
-        remembered: String? = null
+        remembered: String? = null,
+        sameNameExists: Boolean = false,
+        usedContacts: Map<String, String> = emptyMap()
     ): MatchResult {
         val seen = HashSet<String>()
-        val candidates = ArrayList<Candidate>()
+        val normalizedUsed = usedContacts.entries.associate { clean(it.key) to it.value }
+        val candidates = ArrayList<ScoredCandidate>()
         for (contact in contacts) {
             val key = clean(contact)
             if (key.isEmpty() || !seen.add(key)) continue
             val candidate = score(student, contact, otherNames)
-            if (candidate.nameScore >= 30) candidates.add(candidate)
+            if (candidate.nameScore < 30) continue
+            val usedBy = normalizedUsed[key]
+            val withUsedReason = if (usedBy != null) {
+                candidate.copy(reasons = candidate.reasons + "已用于 $usedBy")
+            } else {
+                candidate
+            }
+            candidates.add(ScoredCandidate(withUsedReason, usedBy != null))
         }
-        val sorted = candidates.sortedByDescending { it.score }
-        if (sorted.isEmpty()) return MatchResult(Verdict.NONE, emptyList())
+        if (candidates.isEmpty()) return MatchResult(Verdict.NONE, emptyList())
+
+        val sorted = candidates.sortedWith(
+            compareBy<ScoredCandidate> { if (it.used) 1 else 0 }
+                .thenByDescending { it.candidate.score }
+        )
+        val sortedCandidates = sorted.map { it.candidate }
 
         if (!remembered.isNullOrBlank()) {
             val rememberedKey = clean(remembered)
-            val index = sorted.indexOfFirst { clean(it.contact) == rememberedKey }
+            val index = sorted.indexOfFirst { clean(it.candidate.contact) == rememberedKey }
             if (index >= 0) {
+                val pick = sorted[index]
+                // 已用于其他学生的联系人即使命中 remembered 也不能 AUTO。
+                if (pick.used) return MatchResult(Verdict.CONFIRM, sortedCandidates)
                 val reordered = ArrayList(sorted)
-                val pick = reordered.removeAt(index)
+                reordered.removeAt(index)
                 reordered.add(0, pick)
-                return MatchResult(Verdict.AUTO, reordered)
+                return MatchResult(Verdict.AUTO, reordered.map { it.candidate })
             }
         }
 
         val first = sorted[0]
         val second = sorted.getOrNull(1)
-        val auto = first.score >= 85 &&
-            first.nameScore == 60 &&
-            first.guardianScore >= 25 &&
-            !first.penalized &&
-            (second == null || first.score - second.score >= 15)
-        return MatchResult(if (auto) Verdict.AUTO else Verdict.CONFIRM, sorted)
+        val auto = !sameNameExists &&
+            !first.used &&
+            first.candidate.score >= 85 &&
+            first.candidate.nameScore == 60 &&
+            first.candidate.guardianScore >= 25 &&
+            !first.candidate.penalized &&
+            (second == null || first.candidate.score - second.candidate.score >= 15)
+        return MatchResult(if (auto) Verdict.AUTO else Verdict.CONFIRM, sortedCandidates)
     }
 
     private fun nameScore(rawName: String, contact: String): Pair<Int, String> {

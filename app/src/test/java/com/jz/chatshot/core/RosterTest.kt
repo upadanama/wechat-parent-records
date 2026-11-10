@@ -6,6 +6,7 @@ import java.time.LocalDate
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -235,6 +236,79 @@ class RosterTest {
         val student = result.students[0]
         assertEquals(LocalDate.of(2026, 10, 11), student.dateFrom)
         assertEquals(LocalDate.of(2026, 10, 13), student.dateTo)
+    }
+
+    private fun parseTimeCell(cell: String): RosterResult {
+        return Roster.parse(
+            listOf(
+                listOf("年级", "姓名", "监护人", "沟通时间"),
+                listOf("一年级", "张三", "妈妈", cell)
+            ),
+            today = today
+        )
+    }
+
+    @Test
+    fun parseTime_hourOnlyWithoutMinutes() {
+        val a = parseTimeCell("10.25 16").students.single()
+        assertEquals("16:00", a.time)
+        assertFalse(a.timeExact)
+
+        val b = parseTimeCell("10.25  16").students.single()
+        assertEquals("16:00", b.time)
+        assertFalse(b.timeExact)
+    }
+
+    @Test
+    fun parseTime_hourWithDianOrShi() {
+        val dian = parseTimeCell("10.25 16点").students.single()
+        assertEquals("16:00", dian.time)
+        assertFalse(dian.timeExact)
+
+        val shi = parseTimeCell("10.25 16时").students.single()
+        assertEquals("16:00", shi.time)
+        assertFalse(shi.timeExact)
+    }
+
+    @Test
+    fun parseTime_hourAndMinutesWithDian() {
+        val dian = parseTimeCell("10.25 16点30").students.single()
+        assertEquals("16:30", dian.time)
+        assertTrue(dian.timeExact)
+
+        val shi = parseTimeCell("10.25 16时30").students.single()
+        assertEquals("16:30", shi.time)
+        assertTrue(shi.timeExact)
+    }
+
+    @Test
+    fun parseTime_halfHour() {
+        val student = parseTimeCell("10.25 16点半").students.single()
+        assertEquals("16:30", student.time)
+        assertTrue(student.timeExact)
+    }
+
+    @Test
+    fun parseTime_colonStillSupported() {
+        val halfWidth = parseTimeCell("10.25 19:31").students.single()
+        assertEquals("19:31", halfWidth.time)
+        assertTrue(halfWidth.timeExact)
+
+        val fullWidth = parseTimeCell("10.25 22：00").students.single()
+        assertEquals("22:00", fullWidth.time)
+        assertTrue(fullWidth.timeExact)
+    }
+
+    @Test
+    fun parseTime_invalidTimeIsEmptyWithoutIssue() {
+        for (cell in listOf("10.25 24", "10.25 16点60", "10.25 25:00")) {
+            val result = parseTimeCell(cell)
+            assertTrue("不应产生 issue：$cell", result.issues.isEmpty())
+            val student = result.students.single()
+            assertEquals("", student.time)
+            assertTrue(student.timeExact)
+            assertEquals(LocalDate.of(2026, 10, 25), student.dateFrom)
+        }
     }
 
     private fun minimalXlsx(): ByteArray {

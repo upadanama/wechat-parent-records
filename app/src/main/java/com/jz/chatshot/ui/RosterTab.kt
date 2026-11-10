@@ -183,8 +183,10 @@ private fun StudentRow(
                 .padding(horizontal = 16.dp, vertical = 10.dp)
         ) {
             val guardianText = if (student.guardian.isEmpty()) "" else "（${student.guardian}）"
+            val sameName = Store.students.any { it.id != student.id && it.name == student.name }
+            val nameText = if (sameName) "${student.name}（同名）" else student.name
             Text(
-                "${student.grade}  ${student.name}$guardianText",
+                "${student.grade}  $nameText$guardianText",
                 fontWeight = FontWeight.SemiBold
             )
             val dateText = buildString {

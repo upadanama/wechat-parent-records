@@ -397,7 +397,20 @@ class ShotService : AccessibilityService() {
                 }
                 val otherNames = Store.students.filter { it.id != student.id }.map { it.name }
                 val remembered = Store.memory[Store.memKey(student)]
-                val result = Matcher.match(student, contacts, otherNames, remembered)
+                val sameNameExists = Store.students.any {
+                    it.id != student.id && it.name == student.name
+                }
+                val usedContacts = Store.students
+                    .filter { it.id != student.id && it.contact.isNotBlank() }
+                    .associate { it.contact to "${it.grade} ${it.name}".trim() }
+                val result = Matcher.match(
+                    student = student,
+                    contacts = contacts,
+                    otherNames = otherNames,
+                    remembered = remembered,
+                    sameNameExists = sameNameExists,
+                    usedContacts = usedContacts
+                )
                 when (result.verdict) {
                     Verdict.AUTO -> {
                         val candidate = result.candidates.firstOrNull()

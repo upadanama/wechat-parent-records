@@ -144,4 +144,49 @@ class MatcherTest {
         assertEquals(Verdict.AUTO, result.verdict)
         assertEquals(60, result.candidates[0].nameScore)
     }
+
+    @Test
+    fun sameNameStudentNeverAutoWithoutRemembered() {
+        val result = Matcher.match(
+            student("张小明", "妈妈"),
+            listOf("张小明妈妈"),
+            otherNames = listOf("张小明"),
+            sameNameExists = true
+        )
+        assertEquals(Verdict.CONFIRM, result.verdict)
+        assertFalse(result.candidates[0].penalized)
+    }
+
+    @Test
+    fun rememberedContactStillAutoWithSameName() {
+        val result = Matcher.match(
+            student("张小明", "妈妈"),
+            listOf("张小明妈妈", "张小明母亲"),
+            remembered = "张小明母亲",
+            sameNameExists = true
+        )
+        assertEquals(Verdict.AUTO, result.verdict)
+        assertEquals("张小明母亲", result.candidates[0].contact)
+    }
+
+    @Test
+    fun usedContactIsSortedLastAndAnnotated() {
+        val used = mapOf("张小明妈妈" to "五年级 张小明")
+        val result = Matcher.match(
+            student("张小明", "妈妈"),
+            listOf("张小明妈妈", "张小明母亲"),
+            usedContacts = used
+        )
+        assertEquals(Verdict.CONFIRM, result.verdict)
+        assertEquals("张小明母亲", result.candidates[0].contact)
+        assertEquals("张小明妈妈", result.candidates[1].contact)
+        assertTrue(result.candidates[1].reasons.any { it == "已用于 五年级 张小明" })
+
+        val onlyUsed = Matcher.match(
+            student("张小明", "妈妈"),
+            listOf("张小明妈妈"),
+            usedContacts = used
+        )
+        assertEquals(Verdict.CONFIRM, onlyUsed.verdict)
+    }
 }

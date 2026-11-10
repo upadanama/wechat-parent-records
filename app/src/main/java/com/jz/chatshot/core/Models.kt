@@ -12,6 +12,7 @@ data class Student(
     val dateFrom: LocalDate?, // 已含偏差后的起止（闭区间），无日期则为 null
     val dateTo: LocalDate?,
     val time: String = "",    // 沟通时间 HH:mm，没有则为空串
+    val timeExact: Boolean = true, // false 表示只写了小时，没有写分钟
     val status: Status = Status.PENDING,
     val contact: String = "", // 已确认的微信联系人显示名
     val note: String = "",    // 异常原因等
