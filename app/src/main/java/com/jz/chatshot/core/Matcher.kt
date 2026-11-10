@@ -93,11 +93,7 @@ object Matcher {
             val candidate = score(student, contact, otherNames)
             if (candidate.nameScore >= 30) candidates.add(candidate)
         }
-        val sorted = candidates.sortedWith(
-            compareByDescending<Candidate> { it.score }
-                .thenByDescending { it.nameScore }
-                .thenBy { it.contact }
-        )
+        val sorted = candidates.sortedByDescending { it.score }
         if (sorted.isEmpty()) return MatchResult(Verdict.NONE, emptyList())
 
         if (!remembered.isNullOrBlank()) {

@@ -219,7 +219,7 @@ private fun PermissionRow(title: String, ready: Boolean, onClick: () -> Unit) {
 @Composable
 private fun ShotThumbnail(path: String, onClick: () -> Unit, onLongClick: () -> Unit) {
     val file = remember(path) { File(Store.shotsRoot(), path) }
-    val bitmap by produceState<Bitmap?>(initialValue = null, path, file.lastModified()) {
+    val bitmap by produceState<Bitmap?>(null, path, file.lastModified()) {
         value = withContext(Dispatchers.IO) { decodeSampled(file, 300) }
     }
     Box(
@@ -247,7 +247,7 @@ private fun ShotThumbnail(path: String, onClick: () -> Unit, onLongClick: () -> 
 @Composable
 private fun FullImageDialog(path: String, onDismiss: () -> Unit) {
     val file = remember(path) { File(Store.shotsRoot(), path) }
-    val bitmap by produceState<Bitmap?>(initialValue = null, path) {
+    val bitmap by produceState<Bitmap?>(null, path) {
         value = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(file.path) }
     }
     Dialog(
