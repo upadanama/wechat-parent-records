@@ -1,6 +1,7 @@
 package com.jz.chatshot.ui
 
 import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -40,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,18 +56,24 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
+import com.jz.chatshot.A11y
 import com.jz.chatshot.ShotService
 import com.jz.chatshot.Store
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
 fun CaptureTab(resumeTick: Int) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var accessibilityReady by remember { mutableStateOf(ShotService.instance != null) }
     var overlayReady by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var batteryReady by remember { mutableStateOf(isIgnoringBattery(context)) }
+    var selfEnableReady by remember { mutableStateOf(A11y.canSelfEnable(context)) }
+    var starting by remember { mutableStateOf(false) }
     var previewPath by remember { mutableStateOf<String?>(null) }
     var deletePath by remember { mutableStateOf<String?>(null) }
     var diagnostics by remember { mutableStateOf<List<File>>(emptyList()) }
@@ -74,6 +82,7 @@ fun CaptureTab(resumeTick: Int) {
         accessibilityReady = ShotService.instance != null
         overlayReady = Settings.canDrawOverlays(context)
         batteryReady = isIgnoringBattery(context)
+        selfEnableReady = A11y.canSelfEnable(context)
         diagnostics = diagnosticFiles()
     }
 
@@ -111,23 +120,74 @@ fun CaptureTab(resumeTick: Int) {
                 openSettings(context, Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             }
         )
+        Text(
+            "自动开启无障碍：${if (selfEnableReady) "已授权" else "未授权"}",
+            color = if (selfEnableReady) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(vertical = 6.dp)
+        )
+        if (!selfEnableReady) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    A11y.GRANT_COMMAND,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = { copyGrantCommand(context) }) {
+                    Text("复制", fontSize = 13.sp)
+                }
+            }
+        }
 
         Spacer(modifier = Modifier.height(12.dp))
         Button(
             onClick = {
-                val service = ShotService.instance
-                if (service == null) {
-                    Toast.makeText(context, "请先开启辅助功能服务", Toast.LENGTH_SHORT).show()
-                } else {
-                    service.showBar()
-                    val intent = context.packageManager.getLaunchIntentForPackage("com.tencent.mm")
-                    if (intent != null) {
-                        context.startActivity(intent)
-                    } else {
-                        Toast.makeText(context, "未安装微信", Toast.LENGTH_SHORT).show()
+                if (!starting) {
+                    starting = true
+                    scope.launch {
+                        try {
+                            var service = ShotService.instance
+                            if (service == null) {
+                                A11y.ensureEnabled(context)
+                                val deadline = System.currentTimeMillis() + 3000
+                                while (ShotService.instance == null &&
+                                    System.currentTimeMillis() < deadline
+                                ) {
+                                    delay(100)
+                                }
+                                service = ShotService.instance
+                            }
+                            val ready = service
+                            if (ready == null) {
+                                Toast.makeText(
+                                    context,
+                                    "无障碍未开启",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                openSettings(
+                                    context,
+                                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                )
+                                return@launch
+                            }
+                            ready.showBar()
+                            val intent = context.packageManager
+                                .getLaunchIntentForPackage("com.tencent.mm")
+                            if (intent != null) {
+                                context.startActivity(intent)
+                            } else {
+                                Toast.makeText(context, "未安装微信", Toast.LENGTH_SHORT).show()
+                            }
+                        } finally {
+                            starting = false
+                        }
                     }
                 }
             },
+            enabled = !starting,
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("开始采集")
@@ -341,6 +401,21 @@ private fun shareDiagnostics(context: Context, files: List<File>) {
         context.startActivity(Intent.createChooser(intent, "分享诊断文件"))
     }.onFailure {
         Toast.makeText(context, "没有可用的分享应用", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun copyGrantCommand(context: Context) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    if (clipboard == null) {
+        Toast.makeText(context, "复制失败", Toast.LENGTH_SHORT).show()
+        return
+    }
+    runCatching {
+        clipboard.setPrimaryClip(ClipData.newPlainText("命令", A11y.GRANT_COMMAND))
+    }.onSuccess {
+        Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+    }.onFailure {
+        Toast.makeText(context, "复制失败", Toast.LENGTH_SHORT).show()
     }
 }
 

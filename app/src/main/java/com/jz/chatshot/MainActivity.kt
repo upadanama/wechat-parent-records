@@ -37,6 +37,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        A11y.ensureEnabled(this)
         resumeTick.value++
     }
 }
