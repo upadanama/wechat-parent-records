@@ -8,6 +8,7 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 import com.jz.chatshot.core.ChatTime
+import com.jz.chatshot.core.SearchBox
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -35,7 +36,7 @@ object WeChat {
         if (term.isEmpty()) return emptyList()
         if (!ensureWeChat(svc)) return emptyList()
 
-        // 聊天页底部输入框也是 editable，必须同时看到搜索页特有的「取消」才复用。
+        // 搜索页输入框在屏幕上方；聊天页底部输入框在下方，按垂直位置区分。
         var editor = findSearchPageEditor(svc)
         var searchEntry = if (editor == null) findSearchEntry(svc.rootInActiveWindow) else null
         var backs = 0
@@ -66,15 +67,24 @@ object WeChat {
             editor = waitForSearchPageEditor(svc) ?: return emptyList()
         }
 
+        // 已在搜索页时直接覆盖输入框，不按返回；写入前再确认一次仍在屏幕上方。
         val activeEditor = editor ?: return emptyList()
+        val screenHeight = svc.resources.displayMetrics.heightPixels
+        if (!isSearchEditor(activeEditor, screenHeight)) return emptyList()
         if (!setSearchText(activeEditor, term)) return emptyList()
 
         delay(700)
         val appeared = waitFor(4000) {
-            findNode(svc.rootInActiveWindow) { node ->
+            val root = svc.rootInActiveWindow
+            findNode(root) { node ->
                 val text = nodeText(node)
                 node.isVisibleToUser && text != null && text in ALL_SECTION_TITLES
-            } != null
+            } != null ||
+                findNode(root) { node ->
+                    val text = nodeText(node)
+                    node.isVisibleToUser && !node.isEditable &&
+                        text != null && text.contains(term)
+                } != null
         }
         if (!appeared) return emptyList()
 
@@ -344,11 +354,15 @@ object WeChat {
 
     private fun findSearchPageEditor(svc: AccessibilityService): AccessibilityNodeInfo? {
         val root = svc.rootInActiveWindow ?: return null
-        val hasCancel = findNode(root) { node ->
-            node.isVisibleToUser && node.text?.toString()?.trim() == "取消"
-        } != null
-        if (!hasCancel) return null
-        return findNode(root) { it.isEditable && it.isVisibleToUser }
+        val screenHeight = svc.resources.displayMetrics.heightPixels
+        return findNode(root) { node -> isSearchEditor(node, screenHeight) }
+    }
+
+    private fun isSearchEditor(node: AccessibilityNodeInfo, screenHeight: Int): Boolean {
+        if (!node.isVisibleToUser || !node.isEditable) return false
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        return SearchBox.isSearchBox(rect.centerY(), screenHeight)
     }
 
     private suspend fun waitForSearchPageEditor(svc: AccessibilityService): AccessibilityNodeInfo? {
