@@ -111,9 +111,9 @@ class RosterTest {
                 "学生姓名", "年级", "与学生关系", "联系电话",
                 "沟通时间", "效果或家长建议", "凭证（电话截屏或微聊截屏）"
             ),
-            listOf("李欣莹", "六年级", "妈妈", "13800000000", "10.24 19:31", "", ""),
+            listOf("张小明", "六年级", "妈妈", "000", "10.24 19:31", "", ""),
             emptyList(),
-            listOf("周桂宇", "六年级", "婆婆", "", "10.17 22：00", "", "")
+            listOf("王小红", "六年级", "婆婆", "", "10.17 22：00", "", "")
         )
 
         val result = Roster.parse(rows, today = today)
@@ -122,7 +122,7 @@ class RosterTest {
         assertTrue(result.issues.isEmpty())
         val first = result.students[0]
         assertEquals("六年级", first.grade)
-        assertEquals("李欣莹", first.name)
+        assertEquals("张小明", first.name)
         assertEquals("妈妈", first.guardian)
         assertEquals("19:31", first.time)
         assertEquals(LocalDate.of(2026, 10, 24), first.dateFrom)

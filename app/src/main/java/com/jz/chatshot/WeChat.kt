@@ -8,6 +8,8 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import kotlin.coroutines.resume
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -25,50 +27,62 @@ object WeChat {
         "群聊", "聊天记录", "搜索网络结果", "搜一搜",
         "公众号", "小程序", "朋友圈", "视频号", "文章", "音乐", "表情"
     )
+    private val START_TITLES = setOf("联系人", "最常使用")
+    private val ALL_SECTION_TITLES = SECTION_TITLES + START_TITLES
+    private val IGNORED_PREFIXES = listOf("更多", "微信号", "昵称", "来自", "包含")
+    private val DUMP_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
     suspend fun findContacts(svc: AccessibilityService, term: String): List<String> {
         if (term.isEmpty()) return emptyList()
         if (!ensureWeChat(svc)) return emptyList()
 
-        var searchEntry: AccessibilityNodeInfo? = null
-        for (attempt in 0..4) {
-            searchEntry = findNode(svc.rootInActiveWindow) { node ->
-                val text = node.text?.toString()?.trim()
-                val desc = node.contentDescription?.toString()?.trim()
-                (text == "搜索" || desc == "搜索") && node.isVisibleToUser && hasClickableAncestor(node)
-            }
-            if (searchEntry != null) break
-            if (attempt < 4) {
+        var editor = findVisibleEditor(svc)
+        if (editor != null && !isLikelySearchEditor(svc, editor)) {
+            // 聊天页底部的输入框同样是 editable，不能误当成搜索框。
+            editor = null
+        }
+
+        if (editor == null) {
+            var searchEntry: AccessibilityNodeInfo? = findSearchEntry(svc.rootInActiveWindow)
+            var backs = 0
+            while (searchEntry == null && backs < 4) {
+                if (!isWeChatForeground(svc)) {
+                    if (!relaunchWeChat(svc)) return emptyList()
+                    searchEntry = findSearchEntry(svc.rootInActiveWindow)
+                    break
+                }
                 svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                backs++
                 delay(700)
+                if (!isWeChatForeground(svc)) {
+                    if (!relaunchWeChat(svc)) return emptyList()
+                    searchEntry = findSearchEntry(svc.rootInActiveWindow)
+                    break
+                }
+                searchEntry = findSearchEntry(svc.rootInActiveWindow)
             }
+            val entry = searchEntry ?: return emptyList()
+            if (!clickNode(svc, entry)) return emptyList()
+            delay(700)
+            editor = waitForEditor(svc) ?: return emptyList()
         }
-        val entry = searchEntry ?: return emptyList()
-        if (!clickNode(svc, entry)) return emptyList()
+
+        val activeEditor = editor ?: return emptyList()
+        if (!setSearchText(activeEditor, term)) return emptyList()
+
+        // 先给微信一点时间替换上次结果，再最多轮询 4 秒等待任一分区标题。
         delay(700)
-
-        var editNode: AccessibilityNodeInfo? = null
-        val hasEditor = waitFor(5000) {
-            editNode = findNode(svc.rootInActiveWindow) { it.isEditable && it.isVisibleToUser }
-            editNode != null
+        val appeared = waitFor(4000) {
+            findNode(svc.rootInActiveWindow) { node ->
+                val text = nodeText(node)
+                node.isVisibleToUser && text != null && text in ALL_SECTION_TITLES
+            } != null
         }
-        val editor = editNode
-        if (!hasEditor || editor == null) return emptyList()
+        if (!appeared) return emptyList()
 
-        val args = Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, term)
-        }
-        var inputted = editor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-        if (!inputted) {
-            editor.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-            inputted = editor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-        }
-        if (!inputted) return emptyList()
-
-        delay(1500)
         val texts = ArrayList<String>()
         collectTexts(svc.rootInActiveWindow, texts)
-        val start = texts.indexOfFirst { it == "联系人" }
+        val start = texts.indexOfFirst { it == "联系人" || it == "最常使用" }
         if (start < 0) return emptyList()
 
         val chars = term.toSet()
@@ -76,7 +90,9 @@ object WeChat {
         for (i in start + 1 until texts.size) {
             val text = texts[i].trim()
             if (text.isEmpty()) continue
+            if (text == "联系人" || text == "最常使用") continue
             if (text in SECTION_TITLES) break
+            if (IGNORED_PREFIXES.any { text.startsWith(it) }) continue
             if (text.length <= 30 && text.any { it in chars }) result.add(text)
         }
         return result.toList()
@@ -91,6 +107,46 @@ object WeChat {
         return clicked
     }
 
+    /** 输出整棵无障碍节点树，用于适配不同微信版本。 */
+    fun dump(root: AccessibilityNodeInfo?): String {
+        val builder = StringBuilder()
+        builder.append("窗口包名=")
+            .append(root?.packageName?.toString() ?: "未知")
+            .append(" 时间=")
+            .append(LocalDateTime.now().format(DUMP_TIME_FORMATTER))
+            .append('\n')
+        if (root != null) appendNodeDump(builder, root, 0)
+        return builder.toString()
+    }
+
+    private fun appendNodeDump(builder: StringBuilder, node: AccessibilityNodeInfo, depth: Int) {
+        repeat(depth) { builder.append("  ") }
+        val className = node.className?.toString()?.substringAfterLast('.')?.takeIf { it.isNotEmpty() } ?: "?"
+        builder.append(className)
+        val text = oneLine(node.text?.toString())
+        if (text.isNotEmpty()) builder.append(" | text=").append(text.take(40))
+        val desc = oneLine(node.contentDescription?.toString())
+        if (desc.isNotEmpty()) builder.append(" | desc=").append(desc.take(40))
+        val id = node.viewIdResourceName
+        if (!id.isNullOrEmpty()) builder.append(" | id=").append(id)
+        val flags = ArrayList<String>()
+        if (node.isClickable) flags.add("clickable")
+        if (node.isEditable) flags.add("editable")
+        if (node.isScrollable) flags.add("scrollable")
+        if (flags.isNotEmpty()) builder.append(" | ").append(flags.joinToString(","))
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        builder.append(" | bounds=").append(rect.toShortString())
+        builder.append('\n')
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            appendNodeDump(builder, child, depth + 1)
+        }
+    }
+
+    private fun oneLine(value: String?): String =
+        value?.replace('\n', ' ')?.replace('\r', ' ')?.trim() ?: ""
+
     fun visibleDate(root: AccessibilityNodeInfo?): LocalDate? {
         if (root == null) return null
         val texts = ArrayList<PositionedText>()
@@ -104,12 +160,60 @@ object WeChat {
 
     private data class PositionedText(val top: Int, val left: Int, val text: String)
 
+    private fun findVisibleEditor(svc: AccessibilityService): AccessibilityNodeInfo? =
+        findNode(svc.rootInActiveWindow) { it.isEditable && it.isVisibleToUser }
+
+    /** 只复用屏幕上半部分的编辑框，避免把聊天页底部的输入框当成搜索框。 */
+    private fun isLikelySearchEditor(svc: AccessibilityService, editor: AccessibilityNodeInfo): Boolean {
+        val rect = Rect()
+        editor.getBoundsInScreen(rect)
+        val height = svc.resources.displayMetrics.heightPixels
+        return height > 0 && rect.centerY() < height / 2
+    }
+
+    private suspend fun waitForEditor(svc: AccessibilityService): AccessibilityNodeInfo? {
+        var editor: AccessibilityNodeInfo? = null
+        waitFor(5000) {
+            editor = findVisibleEditor(svc)
+            editor != null
+        }
+        return editor
+    }
+
+    private fun setSearchText(editor: AccessibilityNodeInfo, term: String): Boolean {
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, term)
+        }
+        if (editor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) return true
+        editor.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        return editor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    private fun findSearchEntry(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? =
+        findNode(root) { node ->
+            val text = node.text?.toString()?.trim()
+            val desc = node.contentDescription?.toString()?.trim()
+            (text == "搜索" || desc == "搜索") && node.isVisibleToUser && hasClickableAncestor(node)
+        }
+
+    private suspend fun relaunchWeChat(svc: AccessibilityService): Boolean {
+        if (!ensureWeChat(svc)) return false
+        delay(700)
+        return true
+    }
+
+    private fun isWeChatForeground(svc: AccessibilityService): Boolean =
+        svc.rootInActiveWindow?.packageName?.toString() == PKG
+
+    private fun nodeText(node: AccessibilityNodeInfo): String? =
+        node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+
     private suspend fun ensureWeChat(svc: AccessibilityService): Boolean {
-        if (svc.rootInActiveWindow?.packageName?.toString() == PKG) return true
+        if (isWeChatForeground(svc)) return true
         val intent = svc.packageManager.getLaunchIntentForPackage(PKG) ?: return false
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         runCatching { svc.startActivity(intent) }
-        return waitFor(5000) { svc.rootInActiveWindow?.packageName?.toString() == PKG }
+        return waitFor(5000) { isWeChatForeground(svc) }
     }
 
     private suspend fun waitFor(timeoutMs: Long = 5000, condition: () -> Boolean): Boolean {

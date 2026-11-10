@@ -92,7 +92,7 @@ object Store {
         return File(ctx.cacheDir, "zips")
     }
 
-    /** 删除截图、压缩包和名单，保留 memory 与邮件设置。 */
+    /** 删除截图、压缩包、诊断文件和名单，保留 memory 与邮件设置。 */
     fun clearAll() {
         shotsRoot().deleteRecursively()
         zipDir().deleteRecursively()

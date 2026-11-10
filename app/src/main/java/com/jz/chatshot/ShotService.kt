@@ -31,6 +31,7 @@ import com.jz.chatshot.core.Student
 import com.jz.chatshot.core.Verdict
 import java.io.File
 import java.io.FileOutputStream
+import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executors
 import kotlin.coroutines.cancellation.CancellationException
@@ -51,6 +52,13 @@ class ShotService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val monthDayFormatter = DateTimeFormatter.ofPattern("MM-dd")
+    private val diagnosticTimeFormatter = DateTimeFormatter.ofPattern("HHmmss")
+    private var lastToast: Toast? = null
+    private var transientStatus: String? = null
+    private val clearTransientRunnable = Runnable {
+        transientStatus = null
+        refreshBar()
+    }
 
     private var windowManager: WindowManager? = null
     private var bar: LinearLayout? = null
@@ -95,7 +103,7 @@ class ShotService : AccessibilityService() {
         }
         val wm = getSystemService(Context.WINDOW_SERVICE) as? WindowManager
         if (wm == null) {
-            toast("无法获取窗口服务")
+            toast("悬浮条添加失败，请检查悬浮窗权限")
             return
         }
         windowManager = wm
@@ -121,11 +129,11 @@ class ShotService : AccessibilityService() {
         )
 
         val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val labels = listOf("◀ 上一位", "查找", "截图", "未找到", "▶ 下一位", "✕ 关闭")
+        val labels = listOf("◀", "查找", "截图", "未找到", "▶", "✕")
         labels.forEachIndexed { index, label ->
             val button = Button(this).apply {
                 text = label
-                textSize = 11f
+                textSize = 13f
                 isAllCaps = false
                 isSingleLine = true
                 minimumWidth = 0
@@ -143,6 +151,10 @@ class ShotService : AccessibilityService() {
             )
         }
         findButton = buttons.getChildAt(1) as Button
+        findButton?.setOnLongClickListener {
+            saveDiagnostic()
+            true
+        }
         root.addView(
             buttons,
             LinearLayout.LayoutParams(
@@ -212,6 +224,7 @@ class ShotService : AccessibilityService() {
 
     fun hideBar() {
         searchJob?.cancel()
+        clearTransientStatus()
         hideCandidates()
         val view = bar ?: return
         runCatching { windowManager?.removeView(view) }
@@ -225,15 +238,17 @@ class ShotService : AccessibilityService() {
     private fun refreshBar() {
         val title = titleView ?: return
         val total = Store.students.size
-        if (total == 0) {
-            title.text = "0/0 名单为空"
-            return
+        val base = if (total == 0) {
+            "0/0 名单为空"
+        } else {
+            val index = Store.current.coerceIn(0, total - 1)
+            val student = Store.students[index]
+            val guardian = if (student.guardian.isEmpty()) "" else "（${student.guardian}）"
+            "${index + 1}/$total ${student.grade} ${student.name}$guardian " +
+                "${bannerDate(student)} 已截${student.shots.size}张"
         }
-        val index = Store.current.coerceIn(0, total - 1)
-        val student = Store.students[index]
-        val guardian = if (student.guardian.isEmpty()) "" else "（${student.guardian}）"
-        title.text = "${index + 1}/$total ${student.grade} ${student.name}$guardian " +
-            "${bannerDate(student)} 已截${student.shots.size}张"
+        val status = transientStatus
+        title.text = if (status == null) base else "$base $status"
     }
 
     private fun bannerDate(student: Student): String {
@@ -274,6 +289,7 @@ class ShotService : AccessibilityService() {
         if (total == 0) return
         Store.current = (Store.current + delta).coerceIn(0, total - 1)
         Store.save()
+        clearTransientStatus()
         hideCandidates()
         refreshBar()
     }
@@ -286,14 +302,17 @@ class ShotService : AccessibilityService() {
 
     private fun takeShot() {
         val student = currentStudent() ?: run {
-            toast("名单为空")
+            showTransientStatus("请先导入名单")
             return
         }
         val now = System.currentTimeMillis()
         if (now - lastShotAt < 1100) return
         lastShotAt = now
 
-        val date = WeChat.visibleDate(rootInActiveWindow) ?: student.dateFrom
+        lastToast?.cancel()
+        lastToast = null
+        val visibleDate = WeChat.visibleDate(rootInActiveWindow)
+        val date = Archive.pickShotDate(student.dateFrom, student.dateTo, visibleDate)
         val barView = bar
         barView?.visibility = View.INVISIBLE
 
@@ -329,12 +348,13 @@ class ShotService : AccessibilityService() {
                                     Store.update(student.id) {
                                         it.copy(shots = it.shots + path, status = Status.SHOT)
                                     }
-                                    toast("已保存")
+                                    barView?.visibility = View.VISIBLE
+                                    showTransientStatus("✓已保存")
                                 } else {
+                                    barView?.visibility = View.VISIBLE
+                                    refreshBar()
                                     toast("保存截图失败")
                                 }
-                                barView?.visibility = View.VISIBLE
-                                refreshBar()
                             }
                         }
                     }
@@ -353,7 +373,7 @@ class ShotService : AccessibilityService() {
 
     private fun startFind() {
         val student = currentStudent() ?: run {
-            toast("名单为空")
+            showTransientStatus("请先导入名单")
             return
         }
         searchJob?.cancel()
@@ -372,7 +392,7 @@ class ShotService : AccessibilityService() {
                     if (contacts.isNotEmpty()) break
                 }
                 if (contacts.isEmpty()) {
-                    toast("未找到候选，请手动查找")
+                    showTransientStatus("未找到候选，请手动查找")
                     return@launch
                 }
                 val otherNames = Store.students.filter { it.id != student.id }.map { it.name }
@@ -384,16 +404,16 @@ class ShotService : AccessibilityService() {
                         if (candidate != null) {
                             openCandidate(student, candidate)
                         } else {
-                            toast("未找到候选，请手动查找")
+                            showTransientStatus("未找到候选，请手动查找")
                         }
                     }
                     Verdict.CONFIRM -> showCandidates(student, result.candidates)
-                    Verdict.NONE -> toast("未找到候选，请手动查找")
+                    Verdict.NONE -> showTransientStatus("未找到候选，请手动查找")
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                toast("自动查找失败，请手动操作")
+                showTransientStatus("自动查找失败，请手动操作")
             } finally {
                 if (token == searchToken) {
                     findButton?.apply {
@@ -414,7 +434,7 @@ class ShotService : AccessibilityService() {
             false
         }
         if (!opened) {
-            toast("自动查找失败，请手动操作")
+            showTransientStatus("自动查找失败，请手动操作")
             return
         }
         Store.update(student.id) {
@@ -423,8 +443,7 @@ class ShotService : AccessibilityService() {
         Store.memory[Store.memKey(student)] = candidate.contact
         Store.save()
         hideCandidates()
-        refreshBar()
-        toast("已打开 ${candidate.contact}")
+        showTransientStatus("✓已打开 ${candidate.contact}")
     }
 
     private fun showCandidates(student: Student, candidates: List<Candidate>) {
@@ -479,8 +498,45 @@ class ShotService : AccessibilityService() {
         candidateScroll?.visibility = View.GONE
     }
 
+    private fun showTransientStatus(message: String) {
+        handler.removeCallbacks(clearTransientRunnable)
+        transientStatus = message
+        refreshBar()
+        handler.postDelayed(clearTransientRunnable, 2000)
+    }
+
+    private fun clearTransientStatus() {
+        handler.removeCallbacks(clearTransientRunnable)
+        transientStatus = null
+    }
+
+    private fun saveDiagnostic() {
+        val snapshot = runCatching { WeChat.dump(rootInActiveWindow) }.getOrNull()
+        if (snapshot == null) {
+            toast("保存诊断失败")
+            return
+        }
+        val stamp = diagnosticTimeFormatter.format(LocalTime.now())
+        ioExecutor.execute {
+            val saved = runCatching {
+                val dir = Store.zipDir()
+                dir.mkdirs()
+                File(dir, "诊断_$stamp.txt").writeText(snapshot, Charsets.UTF_8)
+            }.isSuccess
+            handler.post {
+                if (saved) {
+                    showTransientStatus("✓已保存诊断")
+                } else {
+                    toast("保存诊断失败")
+                }
+            }
+        }
+    }
+
     private fun toast(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        val tip = Toast.makeText(this, message, Toast.LENGTH_SHORT)
+        lastToast = tip
+        tip.show()
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

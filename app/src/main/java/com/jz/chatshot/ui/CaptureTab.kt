@@ -1,5 +1,6 @@
 package com.jz.chatshot.ui
 
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -30,6 +31,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -51,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.FileProvider
 import com.jz.chatshot.ShotService
 import com.jz.chatshot.Store
 import java.io.File
@@ -65,11 +68,13 @@ fun CaptureTab(resumeTick: Int) {
     var batteryReady by remember { mutableStateOf(isIgnoringBattery(context)) }
     var previewPath by remember { mutableStateOf<String?>(null) }
     var deletePath by remember { mutableStateOf<String?>(null) }
+    var diagnostics by remember { mutableStateOf<List<File>>(emptyList()) }
 
     LaunchedEffect(resumeTick) {
         accessibilityReady = ShotService.instance != null
         overlayReady = Settings.canDrawOverlays(context)
         batteryReady = isIgnoringBattery(context)
+        diagnostics = diagnosticFiles()
     }
 
     val student = Store.students.getOrNull(Store.current)
@@ -166,6 +171,34 @@ fun CaptureTab(resumeTick: Int) {
                         }
                     }
                 }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+        Text("诊断文件：${diagnostics.size} 个", fontSize = 13.sp)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = { shareDiagnostics(context, diagnostics) },
+                enabled = diagnostics.isNotEmpty(),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("分享诊断文件", fontSize = 13.sp)
+            }
+            OutlinedButton(
+                onClick = {
+                    diagnostics.forEach { it.delete() }
+                    diagnostics = diagnosticFiles()
+                    Toast.makeText(context, "已删除诊断文件", Toast.LENGTH_SHORT).show()
+                },
+                enabled = diagnostics.isNotEmpty(),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("删除诊断文件", fontSize = 13.sp)
             }
         }
     }
@@ -273,6 +306,35 @@ private fun FullImageDialog(path: String, onDismiss: () -> Unit) {
                 CircularProgressIndicator()
             }
         }
+    }
+}
+
+private fun diagnosticFiles(): List<File> {
+    val dir = Store.zipDir()
+    if (!dir.isDirectory) return emptyList()
+    return dir.listFiles { file ->
+        file.isFile && file.name.startsWith("诊断_") && file.name.endsWith(".txt")
+    }?.sortedBy { it.name } ?: emptyList()
+}
+
+private fun shareDiagnostics(context: Context, files: List<File>) {
+    if (files.isEmpty()) {
+        Toast.makeText(context, "没有诊断文件", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val uris = files.map { FileProvider.getUriForFile(context, "com.jz.chatshot.files", it) }
+    val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+        type = "text/plain"
+        putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    val clip = ClipData.newRawUri("诊断文件", uris.first())
+    uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
+    intent.clipData = clip
+    runCatching {
+        context.startActivity(Intent.createChooser(intent, "分享诊断文件"))
+    }.onFailure {
+        Toast.makeText(context, "没有可用的分享应用", Toast.LENGTH_SHORT).show()
     }
 }
 

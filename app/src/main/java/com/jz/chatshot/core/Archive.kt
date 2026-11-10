@@ -33,8 +33,24 @@ object Archive {
         return path
     }
 
+    /**
+     * 选择截图归档日期：
+     * - 名单只有一个日期（起止相同或只有一端）时，直接使用名单日期；
+     * - 名单是起止不同的范围时，优先用聊天页可见日期，取不到再用 dateFrom；
+     * - 名单没有日期时，使用聊天页可见日期，可为 null。
+     */
+    fun pickShotDate(from: LocalDate?, to: LocalDate?, visible: LocalDate?): LocalDate? {
+        if (from != null && to == null) return from
+        if (from == null && to != null) return to
+        if (from != null && to != null) {
+            return if (from == to) from else (visible ?: from)
+        }
+        return visible
+    }
+
     fun zipGrades(root: File, outDir: File): List<File> {
         if (!outDir.exists()) outDir.mkdirs()
+        // 只清理旧的 .zip，保留同目录下的诊断 txt。
         outDir.listFiles { file -> file.isFile && file.name.endsWith(".zip") }?.forEach { it.delete() }
         if (!root.isDirectory) return emptyList()
 

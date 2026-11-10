@@ -265,6 +265,7 @@ private const val CSV_NAME = "结果清单.csv"
 private fun listAttachments(): List<File> {
     val dir = Store.zipDir()
     if (!dir.isDirectory) return emptyList()
+    // 邮件附件只取年级压缩包和结果清单，诊断 txt 不随邮件发送。
     val zips = dir.listFiles { file -> file.isFile && file.name.endsWith(".zip") }
         ?.sortedBy { it.name }
         ?: emptyList()

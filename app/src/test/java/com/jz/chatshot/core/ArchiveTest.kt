@@ -8,6 +8,7 @@ import java.util.zip.ZipInputStream
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -62,6 +63,39 @@ class ArchiveTest {
     }
 
     @Test
+    fun pickShotDateUsesSingleRosterDate() {
+        val date = LocalDate.of(2026, 10, 12)
+        val visible = LocalDate.of(2026, 10, 20)
+        assertEquals(date, Archive.pickShotDate(date, date, visible))
+    }
+
+    @Test
+    fun pickShotDateUsesOnlyProvidedBound() {
+        val date = LocalDate.of(2026, 10, 12)
+        val visible = LocalDate.of(2026, 10, 20)
+        assertEquals(date, Archive.pickShotDate(date, null, visible))
+        assertEquals(date, Archive.pickShotDate(null, date, visible))
+    }
+
+    @Test
+    fun pickShotDatePrefersVisibleDateForRange() {
+        val from = LocalDate.of(2026, 10, 12)
+        val to = LocalDate.of(2026, 10, 18)
+        val visible = LocalDate.of(2026, 10, 15)
+        assertEquals(visible, Archive.pickShotDate(from, to, visible))
+    }
+
+    @Test
+    fun pickShotDateFallsBackWhenNoVisibleDate() {
+        val from = LocalDate.of(2026, 10, 12)
+        val to = LocalDate.of(2026, 10, 18)
+        assertEquals(from, Archive.pickShotDate(from, to, null))
+        assertNull(Archive.pickShotDate(null, null, null))
+        val visible = LocalDate.of(2026, 10, 15)
+        assertEquals(visible, Archive.pickShotDate(null, null, visible))
+    }
+
+    @Test
     fun zipGradesCreatesChineseEntriesAndDeletesOldZips() {
         File(root, "一年级/张三/a.png").apply {
             parentFile.mkdirs()
@@ -79,11 +113,13 @@ class ArchiveTest {
         File(root, "loose.txt").writeText("x")
         out.mkdirs()
         File(out, "old.zip").writeText("old")
+        File(out, "诊断_120000.txt").writeText("diag")
 
         val zips = Archive.zipGrades(root, out)
 
         assertEquals(listOf("一年级.zip", "二年级.zip"), zips.map { it.name })
         assertFalse(File(out, "old.zip").exists())
+        assertTrue(File(out, "诊断_120000.txt").exists())
         assertEquals(
             listOf("一年级/张三/a.png", "一年级/张三/子目录/说明.txt"),
             zipEntries(File(out, "一年级.zip"))
