@@ -118,6 +118,27 @@ class ArchiveTest {
     }
 
     @Test
+    fun zipFilesSortByGradeOrderWithUngradedLast() {
+        val input = listOf(
+            "六年级.zip",
+            "三年级.zip",
+            "未分年级.zip",
+            "五年级.zip",
+            "四年级.zip"
+        ).map { File(it) }
+        assertEquals(
+            listOf(
+                "三年级.zip",
+                "四年级.zip",
+                "五年级.zip",
+                "六年级.zip",
+                "未分年级.zip"
+            ),
+            Archive.sortZipFiles(input).map { it.name }
+        )
+    }
+
+    @Test
     fun exportSingleGradeKeepsGradeFolder() {
         File(root, "raw/single.png").apply {
             parentFile.mkdirs()

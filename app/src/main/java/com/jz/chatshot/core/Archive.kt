@@ -167,6 +167,15 @@ object Archive {
         )
     }
 
+    /** 仅用于附件/展示排序；不改变 ZIP 文件名、ZIP 内部目录或导出序号。 */
+    fun sortZipFiles(files: List<File>): List<File> =
+        files.sortedWith(
+            compareBy<File> { zipGradeRank(it.name) }.thenBy { it.name }
+        )
+
+    private fun zipGradeRank(fileName: String): Int =
+        gradeRank(fileName.removeSuffix(".zip"))
+
     private fun gradeRank(folder: String): Int {
         val index = GRADE_ORDER.indexOf(folder)
         return if (index >= 0) index else GRADE_ORDER.size

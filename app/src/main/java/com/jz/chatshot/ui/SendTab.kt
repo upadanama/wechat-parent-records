@@ -275,7 +275,7 @@ private fun listAttachments(): List<File> {
     if (!dir.isDirectory) return emptyList()
     // 邮件附件包含年级压缩包、结果清单和缺失名单；诊断 txt 不随邮件发送。
     val zips = dir.listFiles { file -> file.isFile && file.name.endsWith(".zip") }
-        ?.sortedBy { it.name }
+        ?.let { Archive.sortZipFiles(it) }
         ?: emptyList()
     val csv = File(dir, CSV_NAME).takeIf { it.isFile }
     val missing = File(dir, Archive.MISSING_NAME).takeIf { it.isFile }
