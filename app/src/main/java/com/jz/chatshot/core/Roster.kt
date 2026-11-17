@@ -58,9 +58,12 @@ object Roster {
             val gradeRaw = cell(row, cols.grade)
             val nameRaw = cell(row, cols.name)
             if (gradeRaw.isBlank() && nameRaw.isBlank()) continue
-            if (gradeRaw.isBlank() || nameRaw.isBlank()) {
-                issues.add(RosterIssue(r + 1, "缺少年级/姓名"))
+            if (nameRaw.isBlank()) {
+                issues.add(RosterIssue(r + 1, "缺少姓名"))
                 continue
+            }
+            if (gradeRaw.isBlank()) {
+                issues.add(RosterIssue(r + 1, "年级为空，导出时放入未分年级"))
             }
 
             val grade = normGrade(gradeRaw)
@@ -162,7 +165,8 @@ object Roster {
                     dateFrom = from,
                     dateTo = to,
                     time = time,
-                    timeExact = timeExact
+                    timeExact = timeExact,
+                    sourceRow = r + 1
                 )
             )
         }

@@ -96,44 +96,56 @@ class ArchiveTest {
     }
 
     @Test
-    fun zipGradesCreatesChineseEntriesAndDeletesOldZips() {
-        File(root, "一年级/张三/a.png").apply {
-            parentFile.mkdirs()
-            writeText("a")
-        }
-        File(root, "一年级/张三/子目录/说明.txt").apply {
-            parentFile.mkdirs()
-            writeText("说明")
-        }
-        File(root, "二年级/王五/中文.png").apply {
-            parentFile.mkdirs()
-            writeText("b")
-        }
-        File(root, "空年级").mkdirs()
-        File(root, "loose.txt").writeText("x")
-        out.mkdirs()
-        File(out, "old.zip").writeText("old")
-        File(out, "诊断_120000.txt").writeText("diag")
-
-        val zips = Archive.zipGrades(root, out)
-
-        assertEquals(listOf("一年级.zip", "二年级.zip"), zips.map { it.name })
-        assertFalse(File(out, "old.zip").exists())
-        assertTrue(File(out, "诊断_120000.txt").exists())
-        assertEquals(
-            listOf("一年级/张三/a.png", "一年级/张三/子目录/说明.txt"),
-            zipEntries(File(out, "一年级.zip"))
-        )
-        assertEquals(listOf("二年级/王五/中文.png"), zipEntries(File(out, "二年级.zip")))
+    fun folderGradeNormalizesToGradeFolder() {
+        assertEquals("一年级", Archive.folderGrade("一年级"))
+        assertEquals("三年级", Archive.folderGrade("3年级"))
+        assertEquals("三年级", Archive.folderGrade("三(2)班"))
+        assertEquals("三年级", Archive.folderGrade("3(2)班"))
+        assertEquals("七年级", Archive.folderGrade("初一"))
+        assertEquals("八年级", Archive.folderGrade("初二"))
+        assertEquals("九年级", Archive.folderGrade("初三"))
+        assertEquals("未分年级", Archive.folderGrade(""))
+        assertEquals("未分年级", Archive.folderGrade("高一"))
     }
 
     @Test
-    fun zipGradesCreatesOutputDirectoryWhenEmpty() {
-        val missingRoot = File(base, "missing")
-        val missingOut = File(base, "new-zips")
-        val zips = Archive.zipGrades(missingRoot, missingOut)
-        assertTrue(zips.isEmpty())
-        assertTrue(missingOut.isDirectory)
+    fun sequenceWidthIsAtLeastTwoAndGrows() {
+        assertEquals(2, Archive.sequenceWidth(1))
+        assertEquals(2, Archive.sequenceWidth(9))
+        assertEquals(2, Archive.sequenceWidth(10))
+        assertEquals(2, Archive.sequenceWidth(99))
+        assertEquals(3, Archive.sequenceWidth(100))
+    }
+
+    @Test
+    fun exportSingleGradeKeepsGradeFolder() {
+        File(root, "raw/single.png").apply {
+            parentFile.mkdirs()
+            writeText("x")
+        }
+        out.mkdirs()
+        File(out, "old.zip").writeText("old")
+        File(out, "诊断_120000.txt").writeText("diag")
+        val student = Student(
+            id = 0,
+            grade = "一年级",
+            name = "张三",
+            guardian = "妈妈",
+            dateFrom = null,
+            dateTo = null,
+            shots = listOf("raw/single.png"),
+            sourceRow = 2
+        )
+        val result = Archive.export(root, out, listOf(student))
+        assertEquals(listOf("一年级.zip"), result.zips.map { it.name })
+        assertEquals(0, result.missingCount)
+        assertTrue(result.missingList.isFile)
+        assertFalse(File(out, "old.zip").exists())
+        assertTrue(File(out, "诊断_120000.txt").isFile)
+        assertEquals(
+            listOf("一年级/01_张三.png"),
+            zipEntries(File(out, "一年级.zip"))
+        )
     }
 
     private fun zipEntries(file: File): List<String> {

@@ -128,10 +128,12 @@ class RosterTest {
         assertEquals("19:31", first.time)
         assertEquals(LocalDate.of(2026, 10, 24), first.dateFrom)
         assertEquals(LocalDate.of(2026, 10, 24), first.dateTo)
+        assertEquals(4, first.sourceRow)
         val second = result.students[1]
         assertEquals("婆婆", second.guardian)
         assertEquals("22:00", second.time)
         assertEquals(LocalDate.of(2026, 10, 17), second.dateFrom)
+        assertEquals(6, second.sourceRow)
     }
 
     @Test
@@ -143,7 +145,7 @@ class RosterTest {
     }
 
     @Test
-    fun parse_reportsRowsMissingGradeOrName() {
+    fun parse_keepsBlankGradeForUngradedExport() {
         val rows = listOf(
             listOf("年级", "姓名", "监护人"),
             listOf("一年级", "", "妈妈"),
@@ -151,12 +153,16 @@ class RosterTest {
             listOf("一年级", "张三", "妈妈")
         )
         val result = Roster.parse(rows, today = today)
-        assertEquals(1, result.students.size)
+        assertEquals(2, result.students.size)
         assertEquals(2, result.issues.size)
-        assertEquals("缺少年级/姓名", result.issues[0].message)
+        assertEquals("缺少姓名", result.issues[0].message)
         assertEquals(2, result.issues[0].row)
-        assertEquals("缺少年级/姓名", result.issues[1].message)
+        assertEquals("年级为空，导出时放入未分年级", result.issues[1].message)
         assertEquals(3, result.issues[1].row)
+        assertEquals("", result.students[0].grade)
+        assertEquals(3, result.students[0].sourceRow)
+        assertEquals("一年级", result.students[1].grade)
+        assertEquals(4, result.students[1].sourceRow)
     }
 
     @Test

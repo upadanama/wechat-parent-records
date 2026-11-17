@@ -111,7 +111,7 @@ fun SendTab() {
                 scope.launch {
                     val result = withContext(Dispatchers.IO) {
                         runCatching {
-                            Archive.zipGrades(root, out)
+                            Archive.export(root, out, roster)
                             writeCsv(out, roster)
                         }
                     }
@@ -174,6 +174,14 @@ fun SendTab() {
         if (attachments.any { it.name == CSV_NAME }) {
             Text(
                 "$CSV_NAME 会一并作为附件。",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+        if (attachments.any { it.name == Archive.MISSING_NAME }) {
+            Text(
+                "${Archive.MISSING_NAME} 会一并作为附件，方便核对缺失截图的学生。",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp)
@@ -265,19 +273,23 @@ private const val CSV_NAME = "结果清单.csv"
 private fun listAttachments(): List<File> {
     val dir = Store.zipDir()
     if (!dir.isDirectory) return emptyList()
-    // 邮件附件只取年级压缩包和结果清单，诊断 txt 不随邮件发送。
+    // 邮件附件包含年级压缩包、结果清单和缺失名单；诊断 txt 不随邮件发送。
     val zips = dir.listFiles { file -> file.isFile && file.name.endsWith(".zip") }
         ?.sortedBy { it.name }
         ?: emptyList()
     val csv = File(dir, CSV_NAME).takeIf { it.isFile }
-    return if (csv != null) zips + csv else zips
+    val missing = File(dir, Archive.MISSING_NAME).takeIf { it.isFile }
+    val result = ArrayList<File>(zips)
+    if (csv != null) result.add(csv)
+    if (missing != null) result.add(missing)
+    return result
 }
 
 private fun writeCsv(dir: File, students: List<Student>): File {
     dir.mkdirs()
     val builder = StringBuilder("\uFEFF")
     builder.append("年级,姓名,称呼,状态,联系人,截图数,备注\r\n")
-    for (s in students) {
+    for (s in students.sortedWith(compareBy<Student> { it.sourceRow }.thenBy { it.id })) {
         val fields = listOf(
             s.grade,
             s.name,

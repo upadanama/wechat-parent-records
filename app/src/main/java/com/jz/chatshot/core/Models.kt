@@ -16,7 +16,8 @@ data class Student(
     val status: Status = Status.PENDING,
     val contact: String = "", // 已确认的微信联系人显示名
     val note: String = "",    // 异常原因等
-    val shots: List<String> = emptyList() // 截图文件相对路径
+    val shots: List<String> = emptyList(), // 截图文件相对路径
+    val sourceRow: Int = 0    // xlsx 原始行号（从 1 起）
 )
 
 data class RosterIssue(val row: Int, val message: String) // row 为 Excel 行号（从 1 起）

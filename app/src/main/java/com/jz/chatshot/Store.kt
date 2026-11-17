@@ -58,6 +58,7 @@ object Store {
             val shots = JSONArray()
             s.shots.forEach { shots.put(it) }
             o.put("shots", shots)
+            o.put("sourceRow", s.sourceRow)
             array.put(o)
         }
         json.put("students", array)
@@ -133,7 +134,8 @@ object Store {
                         status = status,
                         contact = o.optString("contact", ""),
                         note = o.optString("note", ""),
-                        shots = shots
+                        shots = shots,
+                        sourceRow = o.optInt("sourceRow", i + 1)
                     )
                 )
             }
